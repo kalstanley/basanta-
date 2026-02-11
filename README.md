@@ -164,9 +164,21 @@ It is lightweight and can be easily customized to add more commands as per your 
     node index.js
     ```
 
-4. **Scan the QR code:**
+   This now also starts a built-in pairing website on port `3000` (or `PORT` / `WEB_PORT` from env).
 
-    Once the bot starts, a QR code will appear in the terminal. Scan this QR code using the Linked Devices feature in WhatsApp to connect your WhatsApp account with the bot.
+4. **Open the website and generate your pair code:**
+
+   Visit:
+
+   ```
+   http://localhost:3000
+   ```
+
+   Enter your WhatsApp number (country code + number, no `+`) and copy the pair code shown.
+
+5. **Connect using the pair code (or QR):**
+
+    In WhatsApp open **Settings → Linked Devices → Link a Device → Link with phone number instead**, then enter the generated code. QR login in terminal is still available.
 
 ---
 

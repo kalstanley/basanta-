@@ -15,6 +15,8 @@ const fs = require('fs')
 const chalk = require('chalk')
 const FileType = require('file-type')
 const path = require('path')
+const http = require('http')
+const { URL } = require('url')
 const axios = require('axios')
 const { handleMessages, handleGroupParticipantUpdate, handleStatus } = require('./main');
 const PhoneNumber = require('awesome-phonenumber')
@@ -77,6 +79,8 @@ global.botname = "KNIGHT BOT"
 global.themeemoji = "•"
 const pairingCode = !!phoneNumber || process.argv.includes("--pairing-code")
 const useMobile = process.argv.includes("--mobile")
+const webPort = Number(process.env.PORT || process.env.WEB_PORT || 3000)
+const pairCodeApiBase = process.env.PAIRCODE_API_URL || 'https://knight-bot-paircode.onrender.com'
 
 // Only create readline interface if we're in an interactive environment
 const rl = process.stdin.isTTY ? readline.createInterface({ input: process.stdin, output: process.stdout }) : null
@@ -88,6 +92,117 @@ const question = (text) => {
         return Promise.resolve(settings.ownerNumber || phoneNumber)
     }
 }
+
+function normalizePhoneNumber(input = '') {
+    return String(input).replace(/[^0-9]/g, '')
+}
+
+function createPanelPage({ code = '', error = '', phone = '' } = {}) {
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Knight Bot Pair Code</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:16px}
+    .card{width:100%;max-width:500px;background:#111827;border:1px solid #334155;border-radius:12px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.3)}
+    h1{margin:0 0 10px;font-size:1.5rem}
+    p{color:#94a3b8;margin:0 0 16px}
+    input,button{width:100%;padding:12px;border-radius:10px;border:1px solid #334155;font-size:1rem}
+    input{background:#0b1220;color:#e2e8f0;margin-bottom:12px}
+    button{background:#2563eb;color:#fff;border:none;font-weight:600;cursor:pointer}
+    .result{margin-top:16px;padding:14px;border-radius:10px;background:#0b1220;border:1px solid #334155}
+    .error{border-color:#ef4444;color:#fda4af}
+    .code{font-size:1.4rem;letter-spacing:.1em;font-weight:700;color:#86efac;text-align:center}
+    .steps{margin-top:14px;font-size:.95rem;color:#cbd5e1}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Connect Knight Bot</h1>
+    <p>Enter your WhatsApp number (with country code, no + sign), then use the generated pairing code in <strong>Linked Devices</strong>.</p>
+    <form method="GET" action="/">
+      <input name="number" required placeholder="e.g. 14155552671" value="${phone}" pattern="[0-9]{6,20}" />
+      <button type="submit">Generate Pair Code</button>
+    </form>
+    ${error ? `<div class="result error">${error}</div>` : ''}
+    ${code ? `<div class="result"><div class="code">${code}</div><div class="steps">Open WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number instead → Enter this code.</div></div>` : ''}
+  </main>
+</body>
+</html>`
+}
+
+function startWebPairingServer() {
+    const server = http.createServer(async (req, res) => {
+        try {
+            const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
+
+            if (reqUrl.pathname === '/health') {
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                return res.end(JSON.stringify({ ok: true, service: 'knightbot-pair-panel' }))
+            }
+
+            if (reqUrl.pathname === '/api/pair-code') {
+                const number = normalizePhoneNumber(reqUrl.searchParams.get('number'))
+                if (!number || number.length < 6 || number.length > 20) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' })
+                    return res.end(JSON.stringify({ ok: false, error: 'Invalid number. Use international format with country code.' }))
+                }
+
+                const response = await axios.get(`${pairCodeApiBase}/code`, { params: { number }, timeout: 30000 })
+                const code = response.data?.code
+
+                if (!code || code === 'Service Unavailable') {
+                    res.writeHead(502, { 'Content-Type': 'application/json' })
+                    return res.end(JSON.stringify({ ok: false, error: 'Pair code service is unavailable. Please try again later.' }))
+                }
+
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                return res.end(JSON.stringify({ ok: true, number, code }))
+            }
+
+            if (reqUrl.pathname === '/') {
+                const number = normalizePhoneNumber(reqUrl.searchParams.get('number'))
+                let code = ''
+                let error = ''
+
+                if (number) {
+                    if (number.length < 6 || number.length > 20) {
+                        error = 'Invalid number. Please enter a full international number.'
+                    } else {
+                        try {
+                            const response = await axios.get(`${pairCodeApiBase}/code`, { params: { number }, timeout: 30000 })
+                            const resultCode = response.data?.code
+                            if (resultCode && resultCode !== 'Service Unavailable') {
+                                code = resultCode
+                            } else {
+                                error = 'Pair code service is unavailable. Please try again later.'
+                            }
+                        } catch (err) {
+                            error = 'Failed to generate code right now. Please try again.'
+                        }
+                    }
+                }
+
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+                return res.end(createPanelPage({ code, error, phone: number }))
+            }
+
+            res.writeHead(404, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'Not Found' }))
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'Server Error' }))
+        }
+    })
+
+    server.listen(webPort, '0.0.0.0', () => {
+        console.log(chalk.green(`🌐 Pair panel running at http://0.0.0.0:${webPort}`))
+    })
+}
+
+startWebPairingServer()
 
 
 async function startXeonBotInc() {
